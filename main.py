@@ -8,7 +8,7 @@ from bson import ObjectId
 from database import db, create_document, get_documents
 from schemas import Note as NoteSchema, Upload as UploadSchema, Contributor as ContributorSchema, Settings as SettingsSchema
 
-app = FastAPI(title="NoteBuddy API", version="0.1.0")
+app = FastAPI(title="NoteBuddy API", version="0.1.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -97,8 +97,9 @@ def list_notes(
     skip: int = 0,
     limit: int = 24,
 ):
+    # Graceful fallback when DB is not configured
     if db is None:
-        raise HTTPException(500, detail="Database not configured")
+        return {"items": [], "count": 0}
     filter_q = {}
     if subject:
         filter_q["subject"] = subject
@@ -126,7 +127,7 @@ def list_notes(
 @app.get("/api/notes/{note_id}")
 def get_note(note_id: str):
     if db is None:
-        raise HTTPException(500, detail="Database not configured")
+        raise HTTPException(404, detail="Note not found")
     try:
         d = db["note"].find_one({"_id": ObjectId(note_id)})
         if not d:
@@ -141,7 +142,7 @@ def get_note(note_id: str):
 def submit_upload(payload: UploadSchema):
     # Public submission goes to pending review queue
     if db is None:
-        raise HTTPException(500, detail="Database not configured")
+        raise HTTPException(503, detail="Database not configured")
     data = payload.dict()
     data["status"] = data.get("status", "pending")
     new_id = create_document("upload", data)
@@ -151,7 +152,7 @@ def submit_upload(payload: UploadSchema):
 @app.get("/api/leaderboard")
 def leaderboard(limit: int = 20):
     if db is None:
-        raise HTTPException(500, detail="Database not configured")
+        return {"items": []}
     cursor = db["contributor"].find({}).sort([("points", -1)]).limit(limit)
     items = []
     for d in cursor:
@@ -172,7 +173,7 @@ def admin_login(body: LoginRequest):
 @app.get("/api/admin/uploads")
 def admin_list_uploads(status: Optional[str] = None, _: bool = Depends(require_admin)):
     if db is None:
-        raise HTTPException(500, detail="Database not configured")
+        raise HTTPException(503, detail="Database not configured")
     q = {}
     if status:
         q["status"] = status
@@ -187,7 +188,7 @@ def admin_list_uploads(status: Optional[str] = None, _: bool = Depends(require_a
 @app.post("/api/admin/uploads/{upload_id}/accept")
 def accept_upload(upload_id: str, body: AcceptPayload, _: bool = Depends(require_admin)):
     if db is None:
-        raise HTTPException(500, detail="Database not configured")
+        raise HTTPException(503, detail="Database not configured")
     try:
         up = db["upload"].find_one({"_id": ObjectId(upload_id)})
         if not up:
@@ -229,7 +230,7 @@ def accept_upload(upload_id: str, body: AcceptPayload, _: bool = Depends(require
 @app.post("/api/admin/uploads/{upload_id}/reject")
 def reject_upload(upload_id: str, body: RejectPayload, _: bool = Depends(require_admin)):
     if db is None:
-        raise HTTPException(500, detail="Database not configured")
+        raise HTTPException(503, detail="Database not configured")
     try:
         db["upload"].update_one({"_id": ObjectId(upload_id)}, {"$set": {"status": "rejected", "reviewer_note": body.reason}})
         return {"ok": True}
@@ -239,6 +240,8 @@ def reject_upload(upload_id: str, body: RejectPayload, _: bool = Depends(require
 
 @app.get("/api/admin/contributors")
 def list_contributors(_: bool = Depends(require_admin)):
+    if db is None:
+        raise HTTPException(503, detail="Database not configured")
     cursor = db["contributor"].find({}).sort([("points", -1)])
     items = []
     for d in cursor:
@@ -249,6 +252,8 @@ def list_contributors(_: bool = Depends(require_admin)):
 
 @app.post("/api/admin/contributors")
 def upsert_contributor(c: ContributorSchema, _: bool = Depends(require_admin)):
+    if db is None:
+        raise HTTPException(503, detail="Database not configured")
     existing = db["contributor"].find_one({"name": c.name})
     if existing:
         db["contributor"].update_one({"_id": existing["_id"]}, {"$set": c.dict()})
@@ -259,6 +264,8 @@ def upsert_contributor(c: ContributorSchema, _: bool = Depends(require_admin)):
 
 @app.post("/api/admin/contributors/adjust-points")
 def adjust_points(body: PointsAdjust, _: bool = Depends(require_admin)):
+    if db is None:
+        raise HTTPException(503, detail="Database not configured")
     try:
         db["contributor"].update_one({"_id": ObjectId(body.contributor_id)}, {"$inc": {"points": body.delta}})
         return {"ok": True}
@@ -268,6 +275,10 @@ def adjust_points(body: PointsAdjust, _: bool = Depends(require_admin)):
 
 @app.get("/api/settings")
 def get_settings():
+    if db is None:
+        # Return built-in defaults when DB missing
+        default = SettingsSchema()
+        return default.dict()
     s = db["settings"].find_one({})
     if not s:
         default = SettingsSchema()
@@ -279,6 +290,8 @@ def get_settings():
 
 @app.put("/api/admin/settings")
 def update_settings(body: SettingsSchema, _: bool = Depends(require_admin)):
+    if db is None:
+        raise HTTPException(503, detail="Database not configured")
     s = db["settings"].find_one({})
     if not s:
         sid = create_document("settings", body)
